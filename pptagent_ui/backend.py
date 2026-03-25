@@ -34,7 +34,7 @@ from pptagent.utils import Config, get_logger, package_join, pjoin, ppt_to_image
 
 # constants
 DEBUG = True if len(sys.argv) == 1 else False
-RUNS_DIR = os.path.abspath('..') + "/runs" # /root/autodl-tmp/PPTAgent/runs
+RUNS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runs")
 STAGES = [
     "PPT Parsing",
     "PDF Parsing",
@@ -376,8 +376,22 @@ async def ppt_gen(task_id: str, rerun=False):
                 models.language_model,
                 models.vision_model,
             )
-            layout_induction = await slide_inducter.layout_induct() # 自动识别幻灯片的布局模板
-            slide_induction = await slide_inducter.content_induct(layout_induction) # 从幻灯片中提取内容
+            layout_induction = await slide_inducter.layout_induct()
+            # Per-layout content induction with error handling
+            for layout_name, cluster in list(layout_induction.items()):
+                if layout_name == "functional_keys" or "content_schema" in cluster:
+                    continue
+                slide = presentation.slides[cluster["template_id"] - 1]
+                try:
+                    turn_id, schema = await slide_inducter.schema_extractor(slide=slide.to_html())
+                    induct.check_schema(schema, slide)
+                    layout_induction[layout_name]["content_schema"] = schema
+                    logger.info(f"Schema OK: {layout_name}")
+                except Exception as e:
+                    logger.warning(f"Skipping layout '{layout_name}': {e}")
+                    if layout_name in layout_induction:
+                        del layout_induction[layout_name]
+            slide_induction = layout_induction
             json.dump(
                 slide_induction,
                 open(pjoin(pptx_config.RUN_DIR, "slide_induction.json"), "w"),
@@ -408,6 +422,8 @@ async def ppt_gen(task_id: str, rerun=False):
             source_doc=source_doc,
             num_slides=task["numberOfPages"],
         )
+        if prs is None:
+            raise Exception("PPT generation failed - no slides were successfully generated")
         prs.save(pjoin(generation_config.RUN_DIR, "final.pptx"))
         logger.info(f"{task_id}: generation finished")
         await progress.report_progress()
